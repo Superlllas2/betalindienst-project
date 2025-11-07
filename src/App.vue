@@ -41,12 +41,12 @@
         </div>
 
         <transition-group name="list" tag="ul" class="file-list" v-if="files.length">
-          <li v-for="file in files" :key="file.name" class="file-item">
+          <li v-for="(file, index) in files" :key="fileKey(file, index)" class="file-item">
             <div class="file-meta">
               <span class="file-name">{{ file.name }}</span>
               <span class="file-size">{{ formatSize(file.size) }}</span>
             </div>
-            <button class="remove" type="button" @click="removeFile(file.name)">
+            <button class="remove" type="button" @click="removeFile(index)">
               <span aria-hidden="true">&times;</span>
               <span class="sr-only">Remove</span>
             </button>
@@ -55,22 +55,80 @@
       </section>
 
       <footer class="action">
-        <button class="cta" type="button">
-          <span>Check for Fraud</span>
+        <button
+          class="cta"
+          type="button"
+          :disabled="isSubmitDisabled"
+          @click="submitFiles"
+        >
+          <span>{{ isChecking ? 'Checking…' : 'Check for Fraud' }}</span>
         </button>
         <p class="disclaimer">
           The fraud engine will execute server-side Python analytics. Hook your API endpoint to bring it
           alive.
         </p>
       </footer>
+
+      <section v-if="errorMessage" class="feedback feedback--error">
+        <p>{{ errorMessage }}</p>
+      </section>
+
+      <section v-if="result" class="results">
+        <div class="results-overview">
+          <div class="summary-pill">
+            {{ summary.accepted }} accepted / {{ summary.rejected }} rejected
+          </div>
+          <div class="summary-score">
+            Fraud score (stub): <strong>{{ fraudScore }}</strong>
+          </div>
+        </div>
+
+        <div class="results-table-wrapper">
+          <table class="results-table" role="grid">
+            <thead>
+              <tr>
+                <th scope="col">File</th>
+                <th scope="col">Ext</th>
+                <th scope="col">MIME</th>
+                <th scope="col">Status</th>
+                <th scope="col">Reasons</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="item in fileDetails" :key="itemKey(item)">
+                <td data-label="File">{{ item.filename || item.name || 'Unknown' }}</td>
+                <td data-label="Ext">{{ item.extension || item.ext || '—' }}</td>
+                <td data-label="MIME">{{ item.mime || item.mimetype || '—' }}</td>
+                <td data-label="Status">
+                  <span :class="['status', statusClass(item.status)]">
+                    {{ formatStatus(item.status) }}
+                  </span>
+                </td>
+                <td data-label="Reasons">
+                  <ul class="reason-list">
+                    <li v-for="(reason, reasonIndex) in normalizeReasons(item.reasons)" :key="reasonIndex">
+                      {{ reason }}
+                    </li>
+                  </ul>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
     </main>
   </div>
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
+
 const files = ref([]);
 const isDragging = ref(false);
+const isChecking = ref(false);
+const errorMessage = ref('');
+const result = ref(null);
+
 const onFileChange = (event) => {
   if (!event.target.files?.length) return;
   files.value = [...files.value, ...Array.from(event.target.files)];
@@ -92,9 +150,11 @@ const onDrop = (event) => {
   isDragging.value = false;
 };
 
-const removeFile = (name) => {
-  files.value = files.value.filter((file) => file.name !== name);
+const removeFile = (index) => {
+  files.value = files.value.filter((_, currentIndex) => currentIndex !== index);
 };
+
+const fileKey = (file, index) => `${file.name}-${file.lastModified ?? 'na'}-${index}`;
 
 const formatSize = (bytes) => {
   if (!Number.isFinite(bytes)) return '';
@@ -108,6 +168,89 @@ const formatSize = (bytes) => {
   }
 
   return `${value.toFixed(value < 10 && index > 0 ? 1 : 0)} ${units[index]}`;
+};
+
+const formatStatus = (status) => {
+  if (!status) return 'Unknown';
+  const normalized = String(status).toLowerCase();
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+};
+
+const statusClass = (status) => {
+  const normalized = typeof status === 'string' ? status.toLowerCase() : '';
+  if (normalized === 'accepted') return 'status--accepted';
+  if (normalized === 'rejected') return 'status--rejected';
+  return 'status--unknown';
+};
+
+const normalizeReasons = (reasons) => {
+  if (!reasons) return ['—'];
+  if (Array.isArray(reasons) && reasons.length) return reasons;
+  if (typeof reasons === 'string' && reasons.trim()) return [reasons];
+  return ['—'];
+};
+
+const isSubmitDisabled = computed(() => !files.value.length || isChecking.value);
+
+const summary = computed(() => {
+  const summaryData = result.value?.summary || {};
+  return {
+    accepted: summaryData.accepted ?? 0,
+    rejected: summaryData.rejected ?? 0
+  };
+});
+
+const fraudScore = computed(() => {
+  const score = result.value?.summary?.fraud_score;
+  if (typeof score === 'number') return score.toFixed(2);
+  if (typeof score === 'string') return score;
+  return 'N/A';
+});
+
+const fileDetails = computed(() => {
+  if (!Array.isArray(result.value?.files)) return [];
+  return result.value.files;
+});
+
+const itemKey = (item) => {
+  const identifier = item.filename || item.name || 'unknown';
+  const ext = item.extension || item.ext || 'none';
+  const mime = item.mime || item.mimetype || 'none';
+  const status = item.status || 'unknown';
+  return `${identifier}-${ext}-${mime}-${status}`;
+};
+
+const submitFiles = async () => {
+  if (!files.value.length || isChecking.value) return;
+
+  const formData = new FormData();
+  files.value.forEach((file) => {
+    formData.append('files', file);
+  });
+
+  isChecking.value = true;
+  errorMessage.value = '';
+
+  try {
+    const response = await fetch('/api/check', {
+      method: 'POST',
+      body: formData
+    });
+
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || 'Failed to reach the fraud service.');
+    }
+
+    const data = await response.json();
+    result.value = data;
+  } catch (error) {
+    console.error(error);
+    errorMessage.value = error instanceof Error ? error.message : 'Unexpected error occurred.';
+    result.value = null;
+  } finally {
+    isChecking.value = false;
+  }
 };
 </script>
 
@@ -342,7 +485,7 @@ const formatSize = (bytes) => {
   background: linear-gradient(135deg, #3bff8c, #00ffc6);
   box-shadow: 0 0 24px var(--glow-color), 0 12px 35px rgba(0, 255, 184, 0.35);
   cursor: pointer;
-  transition: transform 0.25s ease, box-shadow 0.25s ease, filter 0.25s ease;
+  transition: transform 0.25s ease, box-shadow 0.25s ease, filter 0.25s ease, opacity 0.25s ease;
 }
 
 .cta:hover {
@@ -350,14 +493,165 @@ const formatSize = (bytes) => {
   box-shadow: 0 0 30px var(--glow-color), 0 16px 40px rgba(0, 255, 184, 0.45);
 }
 
-.cta span {
-  position: relative;
-  z-index: 1;
+.cta:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+  box-shadow: 0 0 16px rgba(88, 255, 195, 0.5), 0 8px 22px rgba(0, 255, 184, 0.2);
+  transform: none;
+  filter: grayscale(0.2);
 }
 
 .disclaimer {
   color: rgba(164, 199, 214, 0.55);
   font-size: 0.95rem;
   line-height: 1.6;
+}
+
+.feedback {
+  margin-top: 1.5rem;
+  padding: 1rem 1.4rem;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 120, 120, 0.35);
+  background: rgba(60, 14, 22, 0.75);
+  color: rgba(255, 192, 203, 0.92);
+  font-weight: 500;
+}
+
+.results {
+  margin-top: 2.5rem;
+  padding: 2rem;
+  border-radius: 24px;
+  background: linear-gradient(145deg, rgba(11, 16, 24, 0.95), rgba(20, 30, 43, 0.9));
+  border: 1px solid rgba(88, 255, 195, 0.14);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.results-overview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.summary-pill {
+  padding: 0.7rem 1.4rem;
+  border-radius: 999px;
+  background: rgba(88, 255, 195, 0.12);
+  color: #58ffc3;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.summary-score {
+  color: rgba(214, 236, 248, 0.85);
+  font-size: 1rem;
+}
+
+.summary-score strong {
+  color: #f8fbff;
+}
+
+.results-table-wrapper {
+  overflow-x: auto;
+}
+
+.results-table {
+  width: 100%;
+  border-collapse: collapse;
+  color: rgba(221, 234, 248, 0.86);
+  font-size: 0.95rem;
+}
+
+.results-table thead {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.75rem;
+  color: rgba(163, 199, 217, 0.6);
+}
+
+.results-table th,
+.results-table td {
+  padding: 0.85rem 1rem;
+  text-align: left;
+  border-bottom: 1px solid rgba(88, 255, 195, 0.08);
+}
+
+.results-table tbody tr:hover {
+  background: rgba(19, 28, 38, 0.65);
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.35rem 0.8rem;
+  border-radius: 999px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+}
+
+.status--accepted {
+  background: rgba(88, 255, 195, 0.18);
+  color: #58ffc3;
+  border: 1px solid rgba(88, 255, 195, 0.35);
+}
+
+.status--rejected {
+  background: rgba(255, 120, 120, 0.18);
+  color: #ff8b8b;
+  border: 1px solid rgba(255, 120, 120, 0.35);
+}
+
+.status--unknown {
+  background: rgba(130, 146, 167, 0.18);
+  color: rgba(207, 220, 234, 0.8);
+  border: 1px solid rgba(130, 146, 167, 0.3);
+}
+
+.reason-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0;
+  padding-left: 1rem;
+  list-style: disc;
+}
+
+@media (max-width: 600px) {
+  .results {
+    padding: 1.5rem;
+  }
+
+  .results-table thead {
+    display: none;
+  }
+
+  .results-table tr {
+    display: grid;
+    gap: 0.6rem;
+    padding: 0.75rem 0;
+    border-bottom: 1px solid rgba(88, 255, 195, 0.12);
+  }
+
+  .results-table td {
+    display: flex;
+    justify-content: space-between;
+    border: none;
+    padding: 0.25rem 0;
+  }
+
+  .results-table td::before {
+    content: attr(data-label);
+    color: rgba(163, 199, 217, 0.65);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
 }
 </style>
