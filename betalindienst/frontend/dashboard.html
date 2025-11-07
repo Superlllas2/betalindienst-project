@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fraud Analysis Dashboard · Betalindienst Fraud Sentinel</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="page-header">
+      <div class="container">
+        <h1>Betalindienst Fraud Sentinel</h1>
+        <p>Your analysis results at a glance.</p>
+      </div>
+    </header>
+    <main>
+      <div class="container">
+        <section class="panel">
+          <div class="dashboard-header">
+            <div>
+              <h2>Analysis Dashboard</h2>
+              <div id="breadcrumb" class="breadcrumb">Dashboard</div>
+            </div>
+            <a href="index.html">&larr; Back to uploads</a>
+          </div>
+          <div id="loading" class="loading-state">
+            <div class="loader"></div>
+            <span>Gathering your results…</span>
+          </div>
+          <div id="error" class="error-box hidden"></div>
+          <div id="content" class="hidden">
+            <div id="kpi-grid" class="kpi-grid"></div>
+            <section class="section" id="flags-section">
+              <h2>Risk Flags</h2>
+              <div id="flags-container" class="flag-grid"></div>
+            </section>
+            <section class="section">
+              <h2>Files</h2>
+              <div class="table-scroll">
+                <table class="files-table">
+                  <thead>
+                    <tr>
+                      <th>Filename</th>
+                      <th>Size</th>
+                      <th>Type</th>
+                      <th>Status</th>
+                      <th>Notes</th>
+                    </tr>
+                  </thead>
+                  <tbody id="files-body"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        </section>
+      </div>
+    </main>
+    <script src="app.js"></script>
+    <script>
+      document.addEventListener('DOMContentLoaded', () => {
+        const params = new URLSearchParams(window.location.search);
+        const jobId = params.get('job');
+        const loadingEl = document.getElementById('loading');
+        const errorEl = document.getElementById('error');
+        const contentEl = document.getElementById('content');
+        const breadcrumbEl = document.getElementById('breadcrumb');
+        const kpiGridEl = document.getElementById('kpi-grid');
+        const flagsContainer = document.getElementById('flags-container');
+        const flagsSection = document.getElementById('flags-section');
+        const filesBody = document.getElementById('files-body');
+
+        if (!jobId) {
+          loadingEl.classList.add('hidden');
+          errorEl.innerHTML = 'Missing job reference. <a href="index.html">Return to upload</a>.';
+          errorEl.classList.remove('hidden');
+          return;
+        }
+
+        breadcrumbEl.textContent = `Dashboard · Job ${jobId}`;
+
+        function describeReason(code) {
+          if (!code) return '—';
+          const mapping = {
+            not_analyzed: 'Ingested for later analysis',
+            file_too_large: 'File rejected: exceeds 50 MB limit',
+            json_not_tabular: 'JSON structure not tabular',
+            parse_error: 'Could not parse file',
+            empty: 'File had no records',
+          };
+          return mapping[code] || code.replace(/_/g, ' ');
+        }
+
+        function renderKPIs(data) {
+          kpiGridEl.innerHTML = '';
+          const summary = data.summary || {};
+          const kpiMap = {};
+          (data.kpis || []).forEach((item) => {
+            kpiMap[item.key] = item;
+          });
+
+          const cards = [];
+          if (kpiMap.suspiciousness) {
+            cards.push({ title: kpiMap.suspiciousness.title, value: AppUtils.formatNumber(kpiMap.suspiciousness.value), hint: kpiMap.suspiciousness.hint });
+          }
+          cards.push({ title: 'Files Analyzed', value: `${summary.analyzed_files || 0}/${summary.total_files || 0}`, hint: 'Analyzed vs uploaded' });
+          cards.push({ title: 'Rules Triggered', value: AppUtils.formatNumber(summary.rules_triggered || 0), hint: 'Total risk rules that fired' });
+          if (kpiMap.night_pct) {
+            cards.push({ title: kpiMap.night_pct.title, value: kpiMap.night_pct.value, hint: 'Share of activity at night' });
+          }
+          if (!cards.length) {
+            cards.push({ title: 'Suspiciousness', value: '0', hint: 'Weighted rule score' });
+          }
+
+          cards.forEach((card) => {
+            const cardEl = document.createElement('div');
+            cardEl.className = 'kpi-card';
+            const titleEl = document.createElement('h3');
+            titleEl.textContent = card.title;
+            const valueEl = document.createElement('div');
+            valueEl.className = 'value';
+            valueEl.textContent = card.value;
+            cardEl.appendChild(titleEl);
+            cardEl.appendChild(valueEl);
+            if (card.hint) {
+              const hintEl = document.createElement('div');
+              hintEl.className = 'muted';
+              hintEl.style.marginTop = '6px';
+              hintEl.textContent = card.hint;
+              cardEl.appendChild(hintEl);
+            }
+            kpiGridEl.appendChild(cardEl);
+          });
+        }
+
+        function renderFlags(flags) {
+          flagsContainer.innerHTML = '';
+          if (!flags || flags.length === 0) {
+            flagsSection.innerHTML = '<h2>Risk Flags</h2><p class="muted">No suspicious patterns detected. Great job!</p>';
+            return;
+          }
+
+          flags.forEach((flag) => {
+            const card = document.createElement('div');
+            card.className = 'flag-card';
+            const title = document.createElement('h3');
+            title.textContent = flag.rule.replace(/_/g, ' ');
+            const explanation = document.createElement('p');
+            explanation.className = 'muted';
+            explanation.textContent = flag.explanation;
+            card.appendChild(title);
+            card.appendChild(explanation);
+
+            if (flag.evidence && flag.evidence.length) {
+              const table = document.createElement('table');
+              table.className = 'evidence-table';
+              const thead = document.createElement('thead');
+              const headerRow = document.createElement('tr');
+              const columns = Array.from(
+                new Set(
+                  flag.evidence.reduce((acc, item) => {
+                    Object.keys(item).forEach((key) => acc.push(key));
+                    return acc;
+                  }, []),
+                ),
+              );
+              columns.sort((a, b) => {
+                if (a === 'row') return -1;
+                if (b === 'row') return 1;
+                return a.localeCompare(b);
+              });
+
+              columns.forEach((col) => {
+                const th = document.createElement('th');
+                th.textContent = col.replace(/_/g, ' ');
+                headerRow.appendChild(th);
+              });
+              thead.appendChild(headerRow);
+              table.appendChild(thead);
+
+              const tbody = document.createElement('tbody');
+              flag.evidence.forEach((row) => {
+                const tr = document.createElement('tr');
+                columns.forEach((col) => {
+                  const td = document.createElement('td');
+                  const value = row[col];
+                  td.textContent = value !== undefined && value !== null ? String(value) : '—';
+                  tr.appendChild(td);
+                });
+                tbody.appendChild(tr);
+              });
+              table.appendChild(tbody);
+              card.appendChild(table);
+            }
+
+            flagsContainer.appendChild(card);
+          });
+        }
+
+        function renderFiles(files) {
+          filesBody.innerHTML = '';
+          (files || []).forEach((file) => {
+            const tr = document.createElement('tr');
+            const nameTd = document.createElement('td');
+            nameTd.textContent = file.filename;
+            const sizeTd = document.createElement('td');
+            sizeTd.textContent = AppUtils.formatBytes(file.size_bytes || 0);
+            const typeTd = document.createElement('td');
+            typeTd.textContent = file.mimetype || '—';
+            const statusTd = document.createElement('td');
+            const badge = document.createElement('span');
+            badge.className = `badge ${file.analyzed ? 'ok' : file.rejected_reason ? 'warn' : 'ok'}`;
+            badge.textContent = file.analyzed ? 'Analyzed' : file.rejected_reason ? 'Not analyzed' : 'Ingested';
+            statusTd.appendChild(badge);
+            const notesTd = document.createElement('td');
+            notesTd.textContent = describeReason(file.rejected_reason);
+
+            tr.appendChild(nameTd);
+            tr.appendChild(sizeTd);
+            tr.appendChild(typeTd);
+            tr.appendChild(statusTd);
+            tr.appendChild(notesTd);
+            filesBody.appendChild(tr);
+          });
+        }
+
+        async function fetchResult() {
+          try {
+            const response = await fetch(`http://localhost:8000/api/result/${encodeURIComponent(jobId)}`);
+            if (!response.ok) {
+              if (response.status === 404) {
+                throw new Error('We could not find that job. It may have expired.');
+              }
+              throw new Error('Unable to load results right now.');
+            }
+            const data = await response.json();
+            loadingEl.classList.add('hidden');
+            errorEl.classList.add('hidden');
+            contentEl.classList.remove('hidden');
+
+            renderKPIs(data);
+            renderFlags(data.flags);
+            renderFiles(data.files);
+          } catch (error) {
+            loadingEl.classList.add('hidden');
+            errorEl.innerHTML = `${error.message} <a href="index.html">Return to upload</a>.`;
+            errorEl.classList.remove('hidden');
+          }
+        }
+
+        fetchResult();
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Betalindienst Fraud Sentinel</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="page-header">
+      <div class="container">
+        <h1>Betalindienst Fraud Sentinel</h1>
+        <p>
+          Upload your payment exports and let the Sentinel surface suspicious behaviour in seconds.
+        </p>
+      </div>
+    </header>
+    <main>
+      <div class="container">
+        <section class="panel">
+          <h2>Upload your transaction files</h2>
+          <p class="muted">Drag in multiple files at once. CSV, JSON, and AFAS XAF exports are analysed instantly.</p>
+          <div id="error" class="alert hidden"></div>
+          <div id="dropzone" class="dropzone" tabindex="0">
+            <div class="dropzone-icon">⬆</div>
+            <div>
+              <strong>Drag &amp; drop files here</strong><br />
+              <span class="muted">or click to browse</span>
+            </div>
+            <input id="file-input" type="file" multiple />
+          </div>
+          <div id="file-list" class="file-list"></div>
+          <button id="submit-btn" class="btn-primary" disabled>Check for Fraud</button>
+          <p class="note">CSV/JSON/XAF analyzed now; other formats ingested for later review.</p>
+        </section>
+      </div>
+    </main>
+    <script src="app.js"></script>
+    <script>
+      document.addEventListener('DOMContentLoaded', () => {
+        const dropzone = document.getElementById('dropzone');
+        const fileInput = document.getElementById('file-input');
+        const fileListEl = document.getElementById('file-list');
+        const submitBtn = document.getElementById('submit-btn');
+        const errorBox = document.getElementById('error');
+
+        let selectedFiles = [];
+        let isUploading = false;
+
+        function setError(message) {
+          if (message) {
+            errorBox.textContent = message;
+            errorBox.classList.remove('hidden');
+          } else {
+            errorBox.textContent = '';
+            errorBox.classList.add('hidden');
+          }
+        }
+
+        function updateSubmitState() {
+          submitBtn.disabled = selectedFiles.length === 0 || isUploading;
+          submitBtn.textContent = isUploading ? 'Uploading…' : 'Check for Fraud';
+        }
+
+        function renderFileList() {
+          fileListEl.innerHTML = '';
+          if (selectedFiles.length === 0) {
+            return;
+          }
+          selectedFiles.forEach((file, index) => {
+            const item = document.createElement('div');
+            item.className = 'file-item';
+
+            const info = document.createElement('div');
+            info.innerHTML = `<span>${file.name}</span><span class="file-meta">${AppUtils.formatBytes(file.size)}</span>`;
+
+            const removeBtn = document.createElement('button');
+            removeBtn.className = 'remove-btn';
+            removeBtn.type = 'button';
+            removeBtn.setAttribute('aria-label', `Remove ${file.name}`);
+            removeBtn.textContent = '×';
+            removeBtn.addEventListener('click', () => {
+              selectedFiles.splice(index, 1);
+              renderFileList();
+              updateSubmitState();
+            });
+
+            item.appendChild(info);
+            item.appendChild(removeBtn);
+            fileListEl.appendChild(item);
+          });
+        }
+
+        function addFiles(fileList) {
+          const newFiles = Array.from(fileList);
+          newFiles.forEach((file) => {
+            const exists = selectedFiles.some(
+              (existing) => existing.name === file.name && existing.size === file.size && existing.lastModified === file.lastModified,
+            );
+            if (!exists) {
+              selectedFiles.push(file);
+            }
+          });
+          renderFileList();
+          updateSubmitState();
+        }
+
+        function handleDrag(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (event.type === 'dragenter' || event.type === 'dragover') {
+            dropzone.classList.add('dragover');
+          } else if (event.type === 'dragleave') {
+            dropzone.classList.remove('dragover');
+          }
+        }
+
+        dropzone.addEventListener('dragenter', handleDrag);
+        dropzone.addEventListener('dragover', handleDrag);
+        dropzone.addEventListener('dragleave', handleDrag);
+        dropzone.addEventListener('drop', (event) => {
+          event.preventDefault();
+          dropzone.classList.remove('dragover');
+          if (event.dataTransfer?.files?.length) {
+            addFiles(event.dataTransfer.files);
+          }
+        });
+
+        dropzone.addEventListener('focus', () => dropzone.classList.add('focused'));
+        dropzone.addEventListener('blur', () => dropzone.classList.remove('focused'));
+        dropzone.addEventListener('keypress', (event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            fileInput.click();
+          }
+        });
+
+        fileInput.addEventListener('change', (event) => {
+          if (event.target.files?.length) {
+            addFiles(event.target.files);
+            fileInput.value = '';
+          }
+        });
+
+        submitBtn.addEventListener('click', async () => {
+          if (selectedFiles.length === 0 || isUploading) {
+            return;
+          }
+
+          setError('');
+          isUploading = true;
+          updateSubmitState();
+
+          const formData = new FormData();
+          selectedFiles.forEach((file) => formData.append('files', file));
+
+          try {
+            const response = await fetch('http://localhost:8000/api/upload', {
+              method: 'POST',
+              body: formData,
+            });
+
+            if (!response.ok) {
+              const errorPayload = await response.json().catch(() => ({}));
+              const message = errorPayload.detail || 'Upload failed. Please try again.';
+              throw new Error(message);
+            }
+
+            const result = await response.json();
+            if (!result.job_id) {
+              throw new Error('Unexpected response from server.');
+            }
+            window.location.href = `dashboard.html?job=${encodeURIComponent(result.job_id)}`;
+          } catch (error) {
+            console.error(error);
+            setError(error.message || 'Upload failed. Please try again later.');
+          } finally {
+            isUploading = false;
+            updateSubmitState();
+          }
+        });
+      });
+    </script>
+  </body>
+</html>
