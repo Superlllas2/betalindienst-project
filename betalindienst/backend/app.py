@@ -73,12 +73,12 @@ async def upload_files(files: List[UploadFile] = File(...)) -> JSONResponse:
         meta["path"] = file_path
 
         suffix = file_path.suffix.lower()
-        if suffix in {".csv", ".json"}:
+        if suffix in {".csv", ".json", ".xaf"}:
             analyzed, reason, analysis = analyzers.analyze_file(file_path, suffix)
             if analyzed and analysis:
                 meta["analysis"] = analysis
             else:
-                meta["rejected_reason"] = reason
+                meta["rejected_reason"] = reason or "not_analyzed"
         else:
             meta["rejected_reason"] = "not_analyzed"
 

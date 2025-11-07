@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import json
 import math
+import zipfile
+import xml.etree.ElementTree as ET
 
 import pandas as pd
 
@@ -332,6 +334,109 @@ def _load_json(path: Path) -> Optional[pd.DataFrame]:
     return None
 
 
+def _strip_tag(tag: str) -> str:
+    if "}" in tag:
+        return tag.split("}", 1)[1]
+    return tag
+
+
+def _find_record_nodes(root: ET.Element) -> Optional[List[ET.Element]]:
+    children = list(root)
+    if not children:
+        return None
+
+    by_tag: Dict[str, List[ET.Element]] = {}
+    for child in children:
+        by_tag.setdefault(_strip_tag(child.tag), []).append(child)
+
+    for nodes in by_tag.values():
+        if len(nodes) >= 2:
+            return nodes
+
+    for child in children:
+        result = _find_record_nodes(child)
+        if result:
+            return result
+    return None
+
+
+def _assign_unique(row: Dict[str, str], key: str, value: str) -> None:
+    candidate = key
+    suffix = 2
+    while candidate in row:
+        candidate = f"{key}_{suffix}"
+        suffix += 1
+    row[candidate] = str(value)
+
+
+def _element_to_row(element: ET.Element, prefix: str = "") -> Dict[str, str]:
+    row: Dict[str, str] = {}
+
+    for attr_key, attr_value in element.attrib.items():
+        key = f"{prefix}_{attr_key}" if prefix else attr_key
+        if attr_value is not None:
+            _assign_unique(row, key, attr_value)
+
+    text = (element.text or "").strip()
+    if text and not list(element):
+        key = prefix or _strip_tag(element.tag)
+        _assign_unique(row, key, text)
+
+    for child in list(element):
+        child_key = _strip_tag(child.tag)
+        key_prefix = f"{prefix}_{child_key}" if prefix else child_key
+        if list(child):
+            nested = _element_to_row(child, key_prefix)
+            for nested_key, nested_value in nested.items():
+                _assign_unique(row, nested_key, nested_value)
+        else:
+            child_text = (child.text or "").strip()
+            if child_text:
+                _assign_unique(row, key_prefix, child_text)
+            for attr_key, attr_value in child.attrib.items():
+                attr_field = f"{key_prefix}_{attr_key}"
+                if attr_value is not None:
+                    _assign_unique(row, attr_field, attr_value)
+
+    return row
+
+
+def _load_xaf(path: Path) -> Tuple[Optional[pd.DataFrame], Optional[str]]:
+    raw_data: Optional[bytes] = None
+
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as archive:
+            for name in archive.namelist():
+                if name.lower().endswith(".xml"):
+                    with archive.open(name) as member:
+                        raw_data = member.read()
+                    break
+        if raw_data is None:
+            return None, "xaf_no_xml"
+    else:
+        raw_data = path.read_bytes()
+
+    try:
+        root = ET.fromstring(raw_data)
+    except ET.ParseError:
+        return None, "xaf_parse_error"
+
+    record_nodes = _find_record_nodes(root)
+    if not record_nodes:
+        return None, "xaf_not_tabular"
+
+    rows = []
+    for node in record_nodes:
+        row = _element_to_row(node)
+        if row:
+            rows.append(row)
+
+    if not rows:
+        return pd.DataFrame(), None
+
+    return pd.DataFrame(rows), None
+
+
 def analyze_file(path: Path, suffix: str) -> Tuple[bool, Optional[str], Optional[FileAnalysis]]:
     """
     Analyse a given file. Returns a tuple of (analyzed, reason, analysis_result).
@@ -349,6 +454,10 @@ def analyze_file(path: Path, suffix: str) -> Tuple[bool, Optional[str], Optional
             df = _load_json(path)
             if df is None:
                 return False, "json_not_tabular", None
+        elif suffix == ".xaf":
+            df, reason = _load_xaf(path)
+            if df is None:
+                return False, reason or "xaf_not_tabular", None
         else:
             return False, "not_analyzed", None
     except Exception:
